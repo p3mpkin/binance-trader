@@ -85,7 +85,7 @@ def parse_args():
                         help='Resume paper positions and stats from --state_file')
 
     # Strategy settings
-    parser.add_argument('--strategy_mode', choices=['mean_reversion', 'breakout'], default='mean_reversion',
+    parser.add_argument('--strategy_mode', choices=['mean_reversion', 'breakout', 'scalping'], default='mean_reversion',
                         help='Trading strategy mode (default: mean_reversion)')
     parser.add_argument('--bb_period', type=int, default=20)
     parser.add_argument('--bb_stddev', type=float, default=2.0)
@@ -93,6 +93,16 @@ def parse_args():
     parser.add_argument('--rsi_oversold', type=float, default=30)
     parser.add_argument('--rsi_overbought', type=float, default=70)
     parser.add_argument('--volume_threshold', type=float, default=1.2)
+    parser.add_argument('--scalping_ema_fast', type=int, default=9,
+                        help='Fast EMA period for scalping mode (default: 9)')
+    parser.add_argument('--scalping_ema_slow', type=int, default=21,
+                        help='Slow EMA period for scalping mode (default: 21)')
+    parser.add_argument('--scalping_take_profit_pct', type=float, default=0.4,
+                        help='Scalping fixed take profit percentage (default: 0.4)')
+    parser.add_argument('--scalping_stop_loss_pct', type=float, default=0.25,
+                        help='Scalping fixed stop loss percentage (default: 0.25)')
+    parser.add_argument('--scalping_pullback_pct', type=float, default=0.15,
+                        help='Max distance from fast EMA for scalping entry (default: 0.15)')
     parser.add_argument('--stop_loss_atr', type=float, default=2.0)
     parser.add_argument('--take_profit', default='middle')
     parser.add_argument('--take_profit_strategy',
@@ -124,6 +134,10 @@ def parse_args():
         parser.error('--max_positions must be at least 1')
     if args.entries_per_scan < 1:
         parser.error('--entries_per_scan must be at least 1')
+    if args.scalping_ema_fast < 1 or args.scalping_ema_slow < 1:
+        parser.error('--scalping_ema_fast and --scalping_ema_slow must be positive')
+    if args.scalping_take_profit_pct <= 0 or args.scalping_stop_loss_pct <= 0:
+        parser.error('--scalping_take_profit_pct and --scalping_stop_loss_pct must be positive')
 
     return args
 
@@ -157,6 +171,11 @@ def bot_args(args, symbol):
         rsi_oversold=args.rsi_oversold,
         rsi_overbought=args.rsi_overbought,
         volume_threshold=args.volume_threshold,
+        scalping_ema_fast=args.scalping_ema_fast,
+        scalping_ema_slow=args.scalping_ema_slow,
+        scalping_take_profit_pct=args.scalping_take_profit_pct,
+        scalping_stop_loss_pct=args.scalping_stop_loss_pct,
+        scalping_pullback_pct=args.scalping_pullback_pct,
         stop_loss_atr=args.stop_loss_atr,
         take_profit=args.take_profit,
         take_profit_strategy=args.take_profit_strategy,
@@ -219,6 +238,11 @@ def save_state(args, bots, cooldown_until, logger):
             'leverage': args.leverage,
             'position_pct': args.position_pct,
             'paper_balance': args.paper_balance,
+            'scalping_ema_fast': args.scalping_ema_fast,
+            'scalping_ema_slow': args.scalping_ema_slow,
+            'scalping_take_profit_pct': args.scalping_take_profit_pct,
+            'scalping_stop_loss_pct': args.scalping_stop_loss_pct,
+            'scalping_pullback_pct': args.scalping_pullback_pct,
         },
         'cooldown_until': cooldown_until,
         'bots': {},
@@ -296,6 +320,70 @@ def load_state(args, logger):
     return bots, cooldown_until
 
 
+def calculate_unrealized_pnl(bot, current_price):
+    position = bot.position
+    if not position:
+        return 0.0, 0.0
+
+    quantity = float(position.get('quantity', 0))
+    entry_price = float(position.get('price', 0))
+    side = position.get('side', 'LONG')
+
+    if side == 'SHORT':
+        gross_pnl = (entry_price - current_price) * quantity
+    else:
+        gross_pnl = (current_price - entry_price) * quantity
+
+    estimated_fees = ((entry_price * quantity) + (current_price * quantity)) * bot.commission
+    net_pnl = gross_pnl - estimated_fees
+
+    notional = entry_price * quantity
+    margin = notional / bot.leverage if bot.market_type == 'futures' and bot.leverage else notional
+    pnl_pct = (net_pnl / margin) * 100 if margin else 0.0
+    return net_pnl, pnl_pct
+
+
+def log_portfolio(args, bots, market_snapshots, logger):
+    if args.live:
+        return
+
+    realized = sum(bot.total_profit for bot in bots.values())
+    total_fees = sum(bot.total_fees for bot in bots.values())
+    unrealized = 0.0
+    open_positions = 0
+
+    for symbol, bot in bots.items():
+        if not bot.position or symbol not in market_snapshots:
+            continue
+
+        analysis = market_snapshots[symbol]
+        current_price = float(analysis['price'])
+        position_pnl, position_pnl_pct = calculate_unrealized_pnl(bot, current_price)
+        unrealized += position_pnl
+        open_positions += 1
+
+        position = bot.position
+        side = position.get('side', 'LONG')
+        side_label = '空单' if side == 'SHORT' else '多单'
+        logger.info(
+            f'{symbol}: 模拟未平仓浮盈浮亏={position_pnl:.8f} USDT '
+            f'(保证金收益率={position_pnl_pct:.2f}%), '
+            f'方向={side_label}, 开仓价={position["price"]:.8f}, '
+            f'当前价={current_price:.8f}, 止损={position["stop_loss"]:.8f}, '
+            f'止盈={position["take_profit"]:.8f}'
+        )
+
+    equity = args.paper_balance + realized + unrealized
+    logger.info(
+        f'账户汇总: 初始资金={args.paper_balance:.8f} USDT, '
+        f'已实现盈亏={realized:.8f} USDT, '
+        f'未平仓浮盈浮亏={unrealized:.8f} USDT, '
+        f'当前权益={equity:.8f} USDT, '
+        f'已扣手续费估算={total_fees:.8f} USDT, '
+        f'持仓数={open_positions}'
+    )
+
+
 def scan_candidates(args, scan_client, logger):
     symbols = fetch_symbols(scan_client, args.market_type, args.quote_asset)
     tickers = fetch_tickers(scan_client)
@@ -303,7 +391,7 @@ def scan_candidates(args, scan_client, logger):
 
     scan_mode = args.scan_mode
     if scan_mode == 'auto':
-        scan_mode = 'trend' if args.strategy_mode == 'breakout' else 'mean_reversion'
+        scan_mode = 'trend' if args.strategy_mode in ['breakout', 'scalping'] else 'mean_reversion'
 
     scan_args = argparse.Namespace(
         interval=args.scan_interval,
@@ -400,6 +488,7 @@ def maybe_open_position(args, mover, bots, cooldown_until, logger):
 
 def track_positions(args, bots, cooldown_until, logger):
     closed = 0
+    market_snapshots = {}
     for symbol, bot in list(bots.items()):
         if not bot.position:
             continue
@@ -407,6 +496,7 @@ def track_positions(args, bots, cooldown_until, logger):
         analysis = bot.analyze_market()
         if not analysis:
             continue
+        market_snapshots[symbol] = analysis
 
         exits_moved = bot.update_position_exits(analysis)
         if exits_moved:
@@ -443,6 +533,8 @@ def track_positions(args, bots, cooldown_until, logger):
             logger.info(f'{symbol}: closed {side} ({reason})')
             save_state(args, bots, cooldown_until, logger)
 
+    if market_snapshots or closed:
+        log_portfolio(args, bots, market_snapshots, logger)
     return closed
 
 

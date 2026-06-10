@@ -63,6 +63,13 @@ class BollingerStrategy:
         self.macd_signal = self.config.get('macd_signal', 9)
         self.use_macd = self.config.get('use_macd', True)  # Enable/disable MACD confirmation
 
+        # Scalping parameters
+        self.scalping_ema_fast = self.config.get('scalping_ema_fast', 9)
+        self.scalping_ema_slow = self.config.get('scalping_ema_slow', 21)
+        self.scalping_take_profit_pct = self.config.get('scalping_take_profit_pct', 0.4)
+        self.scalping_stop_loss_pct = self.config.get('scalping_stop_loss_pct', 0.25)
+        self.scalping_pullback_pct = self.config.get('scalping_pullback_pct', 0.15)
+
         self.logger = logging.getLogger('BollingerStrategy')
 
     def _calculate_take_profit(
@@ -162,6 +169,9 @@ class BollingerStrategy:
         bb_percent = Indicators.bb_percent(current_price, upper_band, lower_band)
         volume_data = Indicators.volume_analysis(volumes, self.volume_period)
         atr = Indicators.atr(highs, lows, closes, 14)
+        ema_fast = Indicators.ema(closes, self.scalping_ema_fast)
+        ema_slow = Indicators.ema(closes, self.scalping_ema_slow)
+        previous_close = closes[-2] if len(closes) >= 2 else closes[-1]
         
         # Calculate MACD indicators
         macd_line, signal_line, histogram = Indicators.macd(closes, self.macd_fast, self.macd_slow, self.macd_signal)
@@ -179,6 +189,9 @@ class BollingerStrategy:
                 'rsi': rsi,
                 'volume_ratio': volume_data['volume_ratio'],
                 'atr': atr,
+                'ema_fast': ema_fast,
+                'ema_slow': ema_slow,
+                'previous_close': previous_close,
                 'macd_line': macd_line,
                 'macd_signal': signal_line,
                 'macd_histogram': histogram,
@@ -204,7 +217,8 @@ class BollingerStrategy:
         # Determine trading signal
         signal_result = self._generate_signal(
             current_price, upper_band, middle_band, lower_band,
-            rsi, volume_data, bb_percent, atr, macd_line, signal_line, histogram, macd_signal_cross
+            rsi, volume_data, bb_percent, atr, macd_line, signal_line, histogram, macd_signal_cross,
+            ema_fast, ema_slow, previous_close
         )
 
         analysis.update(signal_result)
@@ -223,7 +237,10 @@ class BollingerStrategy:
         macd_line: float,
         macd_signal: float,
         macd_histogram: float,
-        macd_signal_cross: str
+        macd_signal_cross: str,
+        ema_fast: float,
+        ema_slow: float,
+        previous_close: float
     ) -> Dict:
         """
         Generate trading signal based on strategy rules + MACD confirmation
@@ -244,10 +261,135 @@ class BollingerStrategy:
                 atr, macd_histogram, macd_signal_cross
             )
 
+        if self.strategy_mode == 'scalping':
+            return self._generate_scalping_signal(
+                price, rsi, volume_data, atr, macd_histogram, macd_signal_cross,
+                ema_fast, ema_slow, previous_close
+            )
+
         return self._generate_mean_reversion_signal(
             price, upper, middle, lower, rsi, volume_data, bb_percent,
             atr, macd_histogram, macd_signal_cross
         )
+
+    def _generate_scalping_signal(
+        self,
+        price: float,
+        rsi: float,
+        volume_data: Dict,
+        atr: float,
+        macd_histogram: float,
+        macd_signal_cross: str,
+        ema_fast: float,
+        ema_slow: float,
+        previous_close: float
+    ) -> Dict:
+        """Generate short-term scalping signals using EMA trend and momentum confirmation."""
+        confidence = 0.0
+        reasons = []
+        pullback = self.scalping_pullback_pct / 100
+
+        trend_up = ema_fast > ema_slow
+        trend_down = ema_fast < ema_slow
+
+        if trend_up:
+            confidence += 25
+            reasons.append(f'EMA trend up ({self.scalping_ema_fast}>{self.scalping_ema_slow})')
+
+            near_fast_ema = price <= ema_fast * (1 + pullback)
+            reclaimed_fast_ema = previous_close <= ema_fast and price > ema_fast
+            if near_fast_ema or reclaimed_fast_ema:
+                confidence += 25
+                reasons.append('Pullback/reclaim near fast EMA')
+
+            if 45 <= rsi <= 75:
+                confidence += 15
+                reasons.append(f'RSI scalping-friendly ({rsi:.1f})')
+            elif rsi > 80:
+                confidence -= 15
+                reasons.append(f'RSI overheated ({rsi:.1f})')
+
+            if volume_data['volume_ratio'] > self.volume_threshold:
+                confidence += 20
+                reasons.append(f'High volume ({volume_data["volume_ratio"]:.2f}x)')
+            elif volume_data['volume_ratio'] > 1.0:
+                confidence += 10
+                reasons.append(f'Above avg volume ({volume_data["volume_ratio"]:.2f}x)')
+
+            if self.use_macd:
+                if macd_signal_cross in ['bullish_cross', 'bullish_momentum'] or macd_histogram > 0:
+                    confidence += 15
+                    reasons.append('MACD short-term bullish')
+                elif macd_histogram < 0:
+                    confidence -= 10
+                    reasons.append('MACD bearish warning')
+
+            if confidence >= 60:
+                stop_loss = price * (1 - self.scalping_stop_loss_pct / 100)
+                take_profit = price * (1 + self.scalping_take_profit_pct / 100)
+                return {
+                    'signal': 'BUY',
+                    'confidence': min(confidence, 100),
+                    'reason': ' | '.join(reasons),
+                    'entry_price': price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'risk_reward': (take_profit - price) / (price - stop_loss) if price > stop_loss else 0
+                }
+
+        elif trend_down:
+            confidence += 25
+            reasons.append(f'EMA trend down ({self.scalping_ema_fast}<{self.scalping_ema_slow})')
+
+            near_fast_ema = price >= ema_fast * (1 - pullback)
+            rejected_fast_ema = previous_close >= ema_fast and price < ema_fast
+            if near_fast_ema or rejected_fast_ema:
+                confidence += 25
+                reasons.append('Pullback/rejection near fast EMA')
+
+            if 25 <= rsi <= 55:
+                confidence += 15
+                reasons.append(f'RSI scalping-friendly ({rsi:.1f})')
+            elif rsi < 20:
+                confidence -= 15
+                reasons.append(f'RSI oversold ({rsi:.1f})')
+
+            if volume_data['volume_ratio'] > self.volume_threshold:
+                confidence += 20
+                reasons.append(f'High volume ({volume_data["volume_ratio"]:.2f}x)')
+            elif volume_data['volume_ratio'] > 1.0:
+                confidence += 10
+                reasons.append(f'Above avg volume ({volume_data["volume_ratio"]:.2f}x)')
+
+            if self.use_macd:
+                if macd_signal_cross in ['bearish_cross', 'bearish_momentum'] or macd_histogram < 0:
+                    confidence += 15
+                    reasons.append('MACD short-term bearish')
+                elif macd_histogram > 0:
+                    confidence -= 10
+                    reasons.append('MACD bullish warning')
+
+            if confidence >= 60:
+                stop_loss = price * (1 + self.scalping_stop_loss_pct / 100)
+                take_profit = price * (1 - self.scalping_take_profit_pct / 100)
+                return {
+                    'signal': 'SELL',
+                    'confidence': min(confidence, 100),
+                    'reason': ' | '.join(reasons),
+                    'entry_price': price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'risk_reward': (price - take_profit) / (stop_loss - price) if stop_loss > price else 0
+                }
+
+        return {
+            'signal': 'WAIT',
+            'confidence': confidence,
+            'reason': 'No scalping setup | ' + ' | '.join(reasons) if reasons else 'Waiting for EMA scalping setup',
+            'entry_price': 0.0,
+            'stop_loss': 0.0,
+            'take_profit': 0.0
+        }
 
     def _generate_mean_reversion_signal(
         self,

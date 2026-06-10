@@ -82,6 +82,35 @@ Bollinger Bands consist of three lines:
 - Adapts to current market volatility
 - Prevents premature stop-outs
 
+### 6. EMA Scalping Mode
+
+`strategy_mode=scalping` is a short-term mode for 1m/3m/5m candles.
+
+**Default settings:**
+- Fast EMA: 9
+- Slow EMA: 21
+- Take profit: 0.4%
+- Stop loss: 0.25%
+- Max pullback distance from fast EMA: 0.15%
+
+**LONG setup:**
+- EMA9 > EMA21
+- Price pulls back near EMA9 or reclaims EMA9
+- RSI is not overheated
+- Volume is at least average, ideally above threshold
+- MACD is bullish or histogram is positive
+
+**SHORT setup:**
+- EMA9 < EMA21
+- Price bounces near EMA9 or rejects below EMA9
+- RSI is not deeply oversold
+- Volume is at least average, ideally above threshold
+- MACD is bearish or histogram is negative
+
+Scalping uses fixed percentage exits by default. When `--move_exits` is enabled,
+the bot can trail the stop loss, but it keeps the fixed scalping take-profit
+target unchanged.
+
 ---
 
 ## Entry Signals

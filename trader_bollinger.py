@@ -72,8 +72,8 @@ Examples:
                         help='Futures entry direction: LONG, SHORT, or BOTH (default: LONG)')
 
     # Bollinger Bands parameters
-    parser.add_argument('--strategy_mode', type=str, choices=['mean_reversion', 'breakout'], default='mean_reversion',
-                        help='Strategy mode: mean_reversion or breakout (default: mean_reversion)')
+    parser.add_argument('--strategy_mode', type=str, choices=['mean_reversion', 'breakout', 'scalping'], default='mean_reversion',
+                        help='Strategy mode: mean_reversion, breakout, or scalping (default: mean_reversion)')
     parser.add_argument('--bb_period', type=int, default=20,
                         help='Bollinger Bands period (default: 20)')
     parser.add_argument('--bb_stddev', type=float, default=2.0,
@@ -90,6 +90,18 @@ Examples:
     # Volume parameters
     parser.add_argument('--volume_threshold', type=float, default=1.2,
                         help='Volume ratio threshold for confirmation (default: 1.2)')
+
+    # Scalping parameters
+    parser.add_argument('--scalping_ema_fast', type=int, default=9,
+                        help='Fast EMA period for scalping mode (default: 9)')
+    parser.add_argument('--scalping_ema_slow', type=int, default=21,
+                        help='Slow EMA period for scalping mode (default: 21)')
+    parser.add_argument('--scalping_take_profit_pct', type=float, default=0.4,
+                        help='Scalping fixed take profit percentage (default: 0.4)')
+    parser.add_argument('--scalping_stop_loss_pct', type=float, default=0.25,
+                        help='Scalping fixed stop loss percentage (default: 0.25)')
+    parser.add_argument('--scalping_pullback_pct', type=float, default=0.15,
+                        help='Max distance from fast EMA for scalping entry (default: 0.15)')
 
     # Risk management
     parser.add_argument('--stop_loss_atr', type=float, default=2.0,
@@ -143,6 +155,10 @@ Examples:
         parser.error('--leverage must be between 1 and 125')
     if args.position_pct < 0 or args.position_pct > 100:
         parser.error('--position_pct must be between 0 and 100')
+    if args.scalping_ema_fast < 1 or args.scalping_ema_slow < 1:
+        parser.error('--scalping_ema_fast and --scalping_ema_slow must be positive')
+    if args.scalping_take_profit_pct <= 0 or args.scalping_stop_loss_pct <= 0:
+        parser.error('--scalping_take_profit_pct and --scalping_stop_loss_pct must be positive')
 
     # Setup logging
     setup_logging(args.debug)
@@ -164,6 +180,12 @@ Examples:
     print(f'Bollinger Bands: {args.bb_period} period, {args.bb_stddev} std dev')
     print(f'RSI: {args.rsi_period} period (Oversold: {args.rsi_oversold}, Overbought: {args.rsi_overbought})')
     print(f'Volume Threshold: {args.volume_threshold}x average')
+    if args.strategy_mode == 'scalping':
+        print(
+            f'Scalping EMA: fast={args.scalping_ema_fast}, slow={args.scalping_ema_slow}; '
+            f'TP={args.scalping_take_profit_pct}%, SL={args.scalping_stop_loss_pct}%, '
+            f'pullback={args.scalping_pullback_pct}%'
+        )
     print(f'BB Width Filter: {args.min_bb_width}% - {args.max_bb_width}%')
     print(f'Minimum Confidence: {args.min_confidence}%')
     print(f'\n--- Risk Management ---')

@@ -275,6 +275,24 @@ python auto_trade_movers.py \
   --move_exits \
   --min_confidence 60
 
+# Short-term scalping mode
+python auto_trade_movers.py \
+  --strategy_mode scalping \
+  --scan_interval 1m \
+  --scan_every 15 \
+  --wait_time 3 \
+  --position_pct 2 \
+  --paper_balance 1000 \
+  --leverage 20 \
+  --futures_side BOTH \
+  --scalping_take_profit_pct 0.4 \
+  --scalping_stop_loss_pct 0.25 \
+  --move_exits \
+  --max_positions 2 \
+  --entries_per_scan 1 \
+  --state_file paper_state.json \
+  --resume_state
+
 # Live mode requires explicit confirmation
 python auto_trade_movers.py \
   --strategy_mode mean_reversion \
@@ -296,6 +314,14 @@ In paper mode, the auto trader saves positions and performance stats to
 `paper_state.json` by default. Use `--resume_state` to restore that simulated
 state after restarting the process. This does not affect live Binance futures
 positions, which remain on the exchange.
+
+While paper positions are open, the auto trader logs per-position unrealized P/L
+and a portfolio summary line. These paper P/L logs use Chinese field labels for
+easier reading in `auto_trade_movers.log`.
+
+`--strategy_mode scalping` uses EMA9/EMA21 short-term trend, pullback/reclaim
+near the fast EMA, RSI, volume, and MACD confirmation. Its default paper targets
+are small: 0.4% take profit and 0.25% stop loss.
 
 ### Example 1: Conservative Long-Term Trading
 ```bash

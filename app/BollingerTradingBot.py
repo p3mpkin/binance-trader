@@ -68,6 +68,11 @@ class BollingerTradingBot:
             'take_profit_strategy': getattr(args, 'take_profit_strategy', 'legacy'),
             'take_profit_value': getattr(args, 'take_profit_value', 2.0),
             'take_profit_band': getattr(args, 'take_profit_band', 'middle'),
+            'scalping_ema_fast': getattr(args, 'scalping_ema_fast', 9),
+            'scalping_ema_slow': getattr(args, 'scalping_ema_slow', 21),
+            'scalping_take_profit_pct': getattr(args, 'scalping_take_profit_pct', 0.4),
+            'scalping_stop_loss_pct': getattr(args, 'scalping_stop_loss_pct', 0.25),
+            'scalping_pullback_pct': getattr(args, 'scalping_pullback_pct', 0.15),
             'min_bb_width': args.min_bb_width,
             'max_bb_width': args.max_bb_width
         }
@@ -199,6 +204,7 @@ class BollingerTradingBot:
 
         price = analysis['price']
         position_side = self.position.get('side', 'LONG')
+        is_scalping = getattr(self.args, 'strategy_mode', '') == 'scalping'
         old_stop = self.position['stop_loss']
         old_take = self.position['take_profit']
 
@@ -207,17 +213,19 @@ class BollingerTradingBot:
             if old_stop <= 0 or new_stop < old_stop:
                 self.position['stop_loss'] = new_stop
 
-            target = indicators.get('bb_lower', old_take)
-            if old_take > 0 and target < old_take:
-                self.position['take_profit'] = target
+            if not is_scalping:
+                target = indicators.get('bb_lower', old_take)
+                if old_take > 0 and target < old_take:
+                    self.position['take_profit'] = target
         else:
             new_stop = price - (atr * self.args.stop_loss_atr)
             if new_stop > old_stop:
                 self.position['stop_loss'] = new_stop
 
-            target = indicators.get('bb_upper', old_take)
-            if old_take > 0 and target > old_take:
-                self.position['take_profit'] = target
+            if not is_scalping:
+                target = indicators.get('bb_upper', old_take)
+                if old_take > 0 and target > old_take:
+                    self.position['take_profit'] = target
 
         if self.position['stop_loss'] != old_stop or self.position['take_profit'] != old_take:
             self.logger.info(
