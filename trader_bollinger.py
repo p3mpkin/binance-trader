@@ -33,19 +33,19 @@ if __name__ == '__main__':
         epilog='''
 Examples:
   # Basic usage with default settings
-  python trader_bollinger.py --symbol BTCUSDT --amount 100
+  python trader_bollinger.py --symbol BTCUSDT --amount 100 --test_mode
 
-  # Custom Bollinger Bands parameters
-  python trader_bollinger.py --symbol ETHUSDT --amount 50 --bb_period 20 --bb_stddev 2.0
+  # Futures paper trading with leverage
+  python trader_bollinger.py --symbol BTCUSDT --position_pct 5 --market_type futures --leverage 20 --test_mode
 
-  # Aggressive trading with lower RSI threshold
-  python trader_bollinger.py --symbol BNBUSDT --quantity 10 --rsi_oversold 35 --rsi_overbought 65
+  # Allow both long and short futures entries
+  python trader_bollinger.py --symbol ETHUSDT --amount 50 --futures_side BOTH --test_mode
+
+  # Spot mode is still available
+  python trader_bollinger.py --symbol BTCUSDT --amount 100 --market_type spot --test_mode
 
   # Conservative trading with higher confidence requirement
-  python trader_bollinger.py --symbol ADAUSDT --amount 100 --min_confidence 70
-
-  # Test mode (no real trades)
-  python trader_bollinger.py --symbol BTCUSDT --amount 100 --test_mode
+  python trader_bollinger.py --symbol ADAUSDT --amount 100 --min_confidence 70 --test_mode
         '''
     )
 
@@ -58,8 +58,22 @@ Examples:
                         help='Fixed quantity to trade (default: 0 = auto-calculate)')
     parser.add_argument('--amount', type=float, default=0,
                         help='Amount in quote currency to trade (e.g., 100 USDT)')
+    parser.add_argument('--position_pct', type=float, default=0,
+                        help='Position margin as percent of available balance/equity (e.g., 5 = 5%%)')
+    parser.add_argument('--paper_balance', type=float, default=1000.0,
+                        help='Virtual account balance for --test_mode percentage sizing (default: 1000)')
+
+    # Market type
+    parser.add_argument('--market_type', type=str, choices=['futures', 'spot'], default='futures',
+                        help='Trading market type: futures or spot (default: futures)')
+    parser.add_argument('--leverage', type=int, default=20,
+                        help='USD-M futures leverage, live mode will set it on Binance (default: 20)')
+    parser.add_argument('--futures_side', type=str, choices=['LONG', 'SHORT', 'BOTH'], default='LONG',
+                        help='Futures entry direction: LONG, SHORT, or BOTH (default: LONG)')
 
     # Bollinger Bands parameters
+    parser.add_argument('--strategy_mode', type=str, choices=['mean_reversion', 'breakout'], default='mean_reversion',
+                        help='Strategy mode: mean_reversion or breakout (default: mean_reversion)')
     parser.add_argument('--bb_period', type=int, default=20,
                         help='Bollinger Bands period (default: 20)')
     parser.add_argument('--bb_stddev', type=float, default=2.0,
@@ -81,9 +95,19 @@ Examples:
     parser.add_argument('--stop_loss_atr', type=float, default=2.0,
                         help='Stop loss as multiple of ATR (default: 2.0)')
     parser.add_argument('--take_profit', type=str, default='middle',
-                        help='Take profit target: "middle", "upper", or percentage (default: middle)')
+                        help='Legacy take profit target: "middle", "upper", percentage, or "trailing" (default: middle)')
+    parser.add_argument('--take_profit_strategy', type=str,
+                        choices=['legacy', 'band', 'percent', 'atr', 'risk_reward', 'trailing'],
+                        default='legacy',
+                        help='Take profit strategy (default: legacy)')
+    parser.add_argument('--take_profit_value', type=float, default=2.0,
+                        help='Value for percent/atr/risk_reward take profit strategies (default: 2.0)')
+    parser.add_argument('--take_profit_band', type=str, choices=['middle', 'outer'], default='middle',
+                        help='Band target for --take_profit_strategy band (default: middle)')
     parser.add_argument('--risk_per_trade', type=float, default=2.0,
                         help='Risk percentage per trade (default: 2.0%%)')
+    parser.add_argument('--move_exits', action='store_true',
+                        help='Move stop loss/take profit using latest ATR and Bollinger Bands while holding')
 
     # Strategy filters
     parser.add_argument('--min_bb_width', type=float, default=1.0,
@@ -105,7 +129,7 @@ Examples:
     parser.add_argument('--max_trades', type=int, default=0,
                         help='Maximum number of trades to execute (0 = unlimited) (default: 0)')
     parser.add_argument('--test_mode', action='store_true',
-                        help='Test mode - analyze only, no real trades')
+                        help='Paper trading mode - virtual positions, no real orders')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging')
 
@@ -114,6 +138,11 @@ Examples:
                         help='Commission payment type: BNB or TOKEN (default: BNB)')
 
     args = parser.parse_args()
+
+    if args.leverage < 1 or args.leverage > 125:
+        parser.error('--leverage must be between 1 and 125')
+    if args.position_pct < 0 or args.position_pct > 100:
+        parser.error('--position_pct must be between 0 and 100')
 
     # Setup logging
     setup_logging(args.debug)
@@ -124,9 +153,14 @@ Examples:
     print('BINANCE BOLLINGER BANDS TRADING BOT')
     print('=' * 70)
     print(f'\nTrading Symbol: {args.symbol}')
+    print(f'Market Type: {args.market_type.upper()}')
     print(f'Interval: {args.interval}')
-    print(f'Test Mode: {"YES - No real trades will be executed" if args.test_mode else "NO - Live trading"}')
+    print(f'Test Mode: {"YES - Paper trading, no real orders" if args.test_mode else "NO - Live trading"}')
+    if args.market_type == 'futures':
+        print(f'Futures Side: {args.futures_side}')
+        print(f'Leverage: {args.leverage}x')
     print(f'\n--- Strategy Parameters ---')
+    print(f'Strategy Mode: {args.strategy_mode}')
     print(f'Bollinger Bands: {args.bb_period} period, {args.bb_stddev} std dev')
     print(f'RSI: {args.rsi_period} period (Oversold: {args.rsi_oversold}, Overbought: {args.rsi_overbought})')
     print(f'Volume Threshold: {args.volume_threshold}x average')
@@ -135,10 +169,23 @@ Examples:
     print(f'\n--- Risk Management ---')
     print(f'Stop Loss: {args.stop_loss_atr}x ATR')
     print(f'Take Profit: {args.take_profit}')
+    print(f'Take Profit Strategy: {args.take_profit_strategy}')
+    if args.take_profit_strategy in ['percent', 'atr', 'risk_reward']:
+        print(f'Take Profit Value: {args.take_profit_value}')
+    if args.take_profit_strategy == 'band':
+        print(f'Take Profit Band: {args.take_profit_band}')
     print(f'Risk per Trade: {args.risk_per_trade}%')
+    print(f'Move Exits: {"YES" if args.move_exits else "NO"}')
     print(f'\n--- Position Sizing ---')
     if args.quantity > 0:
         print(f'Fixed Quantity: {args.quantity}')
+    elif args.position_pct > 0:
+        notional_pct = args.position_pct * args.leverage if args.market_type == 'futures' else args.position_pct
+        print(f'Position Margin: {args.position_pct}% of balance')
+        if args.market_type == 'futures':
+            print(f'Approx Notional: {notional_pct}% of balance at {args.leverage}x')
+        if args.test_mode:
+            print(f'Paper Balance: {args.paper_balance}')
     elif args.amount > 0:
         print(f'Fixed Amount: {args.amount} (quote currency)')
     else:

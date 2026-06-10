@@ -139,7 +139,22 @@ The bot calculates a confidence score (0-100%) for each signal:
 python trader_bollinger.py \
   --symbol BTCUSDT \
   --amount 100 \
+  --market_type futures \
+  --leverage 20 \
   --interval 5m \
+  --test_mode
+```
+
+**5% margin with 20x leverage and moving exits:**
+```bash
+python trader_bollinger.py \
+  --symbol BTCUSDT \
+  --position_pct 5 \
+  --paper_balance 1000 \
+  --market_type futures \
+  --leverage 20 \
+  --futures_side BOTH \
+  --move_exits \
   --test_mode
 ```
 
@@ -155,6 +170,13 @@ python trader_bollinger.py \
   # Position sizing (choose one)
   --amount 100 \              # Amount in quote currency (recommended)
   --quantity 0.01 \           # Fixed quantity
+  --position_pct 5 \          # Margin percent of balance/equity
+  --paper_balance 1000 \      # Virtual balance for --test_mode sizing
+
+  # Market
+  --market_type futures \      # futures or spot (default: futures)
+  --leverage 20 \              # USD-M futures leverage
+  --futures_side LONG \        # LONG, SHORT, or BOTH
 
   # Bollinger Bands
   --bb_period 20 \            # BB lookback period
@@ -171,7 +193,11 @@ python trader_bollinger.py \
   # Risk Management
   --stop_loss_atr 2.0 \       # Stop loss distance (ATR multiplier)
   --take_profit middle \      # Take profit: middle, upper, or %
+  --take_profit_strategy legacy \ # legacy, band, percent, atr, risk_reward, trailing
+  --take_profit_value 2.0 \   # value for percent/atr/risk_reward
+  --take_profit_band middle \ # middle or outer for band strategy
   --risk_per_trade 2.0 \      # Risk per trade (% of balance)
+  --move_exits \              # Move SL/TP with ATR and BB while holding
 
   # Filters
   --min_bb_width 1.0 \        # Minimum volatility
@@ -185,13 +211,91 @@ python trader_bollinger.py \
   # Bot Behavior
   --wait_time 10 \            # Seconds between cycles
   --max_trades 10 \           # Max trades before stopping (0=unlimited)
-  --test_mode \               # Test mode (no real trades)
+  --test_mode \               # Paper trading (no real orders)
   --debug                     # Verbose logging
 ```
 
 ---
 
 ## 💡 Usage Examples
+
+### Scan Movers Before Trading
+```bash
+# Find unusual USD-M futures movers
+python scan_movers.py --market_type futures --interval 5m --top 20
+
+# Require stronger short-term activity
+python scan_movers.py \
+  --market_type futures \
+  --interval 5m \
+  --min_quote_volume 50000000 \
+  --min_volume_ratio 2 \
+  --min_range_pct 1 \
+  --top 20
+```
+
+The scanner prints symbols with a composite score based on 24h change, recent
+volume spike, latest candle range, Bollinger Band width, and band breakout
+position. Use the `Dir` column as a watchlist hint, then run the trading bot on
+the symbols you want to test.
+
+### Auto-Trade Scanned Movers
+```bash
+# Paper trading: scan movers, confirm with strategy, then track positions
+python auto_trade_movers.py \
+  --strategy_mode mean_reversion \
+  --position_pct 5 \
+  --paper_balance 1000 \
+  --leverage 20 \
+  --futures_side BOTH \
+  --move_exits \
+  --max_positions 3 \
+  --entries_per_scan 1
+
+# Resume paper positions/stats after an interruption
+python auto_trade_movers.py \
+  --strategy_mode mean_reversion \
+  --position_pct 5 \
+  --paper_balance 1000 \
+  --leverage 20 \
+  --futures_side BOTH \
+  --move_exits \
+  --state_file paper_state.json \
+  --resume_state
+
+# Trend breakout mode
+python auto_trade_movers.py \
+  --strategy_mode breakout \
+  --take_profit_strategy risk_reward \
+  --take_profit_value 2 \
+  --position_pct 5 \
+  --paper_balance 1000 \
+  --leverage 20 \
+  --futures_side BOTH \
+  --move_exits \
+  --min_confidence 60
+
+# Live mode requires explicit confirmation
+python auto_trade_movers.py \
+  --strategy_mode mean_reversion \
+  --position_pct 5 \
+  --leverage 20 \
+  --futures_side BOTH \
+  --move_exits \
+  --max_positions 3 \
+  --entries_per_scan 1 \
+  --live
+```
+
+The auto trader does not open directly from scanner direction alone. It first
+uses `scan_movers.py` logic to find candidates, then runs the Bollinger strategy
+on each candidate. A `LONG` candidate must confirm with `Signal=BUY`; a `SHORT`
+candidate must confirm with `Signal=SELL`.
+
+In paper mode, the auto trader saves positions and performance stats to
+`paper_state.json` by default. Use `--resume_state` to restore that simulated
+state after restarting the process. This does not affect live Binance futures
+positions, which remain on the exchange.
 
 ### Example 1: Conservative Long-Term Trading
 ```bash

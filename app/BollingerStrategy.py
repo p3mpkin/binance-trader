@@ -31,6 +31,7 @@ class BollingerStrategy:
             config: Strategy configuration parameters
         """
         self.config = config or {}
+        self.strategy_mode = self.config.get('strategy_mode', 'mean_reversion')
 
         # Bollinger Bands parameters
         self.bb_period = self.config.get('bb_period', 20)
@@ -48,6 +49,9 @@ class BollingerStrategy:
         # Risk management
         self.stop_loss_atr_multiplier = self.config.get('stop_loss_atr', 2.0)
         self.take_profit_target = self.config.get('take_profit', 'middle')  # 'middle', 'upper', or percentage
+        self.take_profit_strategy = self.config.get('take_profit_strategy', 'legacy')
+        self.take_profit_value = self.config.get('take_profit_value', 2.0)
+        self.take_profit_band = self.config.get('take_profit_band', 'middle')
 
         # Additional filters
         self.min_bb_width = self.config.get('min_bb_width', 1.0)  # Minimum volatility
@@ -60,6 +64,51 @@ class BollingerStrategy:
         self.use_macd = self.config.get('use_macd', True)  # Enable/disable MACD confirmation
 
         self.logger = logging.getLogger('BollingerStrategy')
+
+    def _calculate_take_profit(
+        self,
+        side: str,
+        price: float,
+        stop_loss: float,
+        middle: float,
+        upper: float,
+        lower: float,
+        atr: float
+    ) -> float:
+        """Calculate take profit using the configured strategy."""
+        strategy = self.take_profit_strategy
+
+        if strategy == 'legacy':
+            if self.take_profit_target == 'middle':
+                return middle
+            if self.take_profit_target == 'upper':
+                return upper if side == 'LONG' else lower
+            if self.take_profit_target == 'trailing':
+                return 0.0
+
+            value = float(self.take_profit_target)
+            return price * (1 + value / 100) if side == 'LONG' else price * (1 - value / 100)
+
+        if strategy == 'band':
+            return middle if self.take_profit_band == 'middle' else (upper if side == 'LONG' else lower)
+
+        if strategy == 'percent':
+            value = float(self.take_profit_value)
+            return price * (1 + value / 100) if side == 'LONG' else price * (1 - value / 100)
+
+        if strategy == 'atr':
+            value = float(self.take_profit_value)
+            return price + (atr * value) if side == 'LONG' else price - (atr * value)
+
+        if strategy == 'risk_reward':
+            value = float(self.take_profit_value)
+            risk = abs(price - stop_loss)
+            return price + (risk * value) if side == 'LONG' else price - (risk * value)
+
+        if strategy == 'trailing':
+            return 0.0
+
+        return middle
 
     def analyze(self, klines: List[List], current_price: float, current_volume: float = 0) -> Dict:
         """
@@ -75,9 +124,14 @@ class BollingerStrategy:
         """
         if not klines or len(klines) < self.bb_period:
             return {
+                'price': current_price,
+                'indicators': {},
                 'signal': 'WAIT',
                 'confidence': 0.0,
-                'reason': 'Insufficient data for analysis'
+                'reason': 'Insufficient data for analysis',
+                'entry_price': 0.0,
+                'stop_loss': 0.0,
+                'take_profit': 0.0
             }
 
         # Extract price and volume data
@@ -93,9 +147,14 @@ class BollingerStrategy:
 
         if upper_band is None:
             return {
+                'price': current_price,
+                'indicators': {},
                 'signal': 'WAIT',
                 'confidence': 0.0,
-                'reason': 'Unable to calculate Bollinger Bands'
+                'reason': 'Unable to calculate Bollinger Bands',
+                'entry_price': 0.0,
+                'stop_loss': 0.0,
+                'take_profit': 0.0
             }
 
         rsi = Indicators.rsi(closes, self.rsi_period)
@@ -179,6 +238,31 @@ class BollingerStrategy:
         Returns:
             Dictionary with signal, confidence, and trade parameters
         """
+        if self.strategy_mode == 'breakout':
+            return self._generate_breakout_signal(
+                price, upper, middle, lower, rsi, volume_data, bb_percent,
+                atr, macd_histogram, macd_signal_cross
+            )
+
+        return self._generate_mean_reversion_signal(
+            price, upper, middle, lower, rsi, volume_data, bb_percent,
+            atr, macd_histogram, macd_signal_cross
+        )
+
+    def _generate_mean_reversion_signal(
+        self,
+        price: float,
+        upper: float,
+        middle: float,
+        lower: float,
+        rsi: float,
+        volume_data: Dict,
+        bb_percent: float,
+        atr: float,
+        macd_histogram: float,
+        macd_signal_cross: str
+    ) -> Dict:
+        """Generate mean-reversion signals around Bollinger Bands."""
         confidence = 0.0
         reasons = []
 
@@ -224,12 +308,9 @@ class BollingerStrategy:
                 # Calculate trade parameters
                 stop_loss = price - (atr * self.stop_loss_atr_multiplier)
 
-                if self.take_profit_target == 'middle':
-                    take_profit = middle
-                elif self.take_profit_target == 'upper':
-                    take_profit = upper
-                else:
-                    take_profit = price * (1 + self.take_profit_target / 100)
+                take_profit = self._calculate_take_profit(
+                    'LONG', price, stop_loss, middle, upper, lower, atr
+                )
 
                 return {
                     'signal': 'BUY',
@@ -302,6 +383,145 @@ class BollingerStrategy:
             'signal': 'WAIT',
             'confidence': confidence,
             'reason': 'No clear signal | ' + ' | '.join(reasons) if reasons else 'Waiting for setup',
+            'entry_price': 0.0,
+            'stop_loss': 0.0,
+            'take_profit': 0.0
+        }
+
+    def _generate_breakout_signal(
+        self,
+        price: float,
+        upper: float,
+        middle: float,
+        lower: float,
+        rsi: float,
+        volume_data: Dict,
+        bb_percent: float,
+        atr: float,
+        macd_histogram: float,
+        macd_signal_cross: str
+    ) -> Dict:
+        """Generate trend-following breakout signals."""
+        confidence = 0.0
+        reasons = []
+
+        # === LONG BREAKOUT ===
+        if price > upper:
+            confidence += 35
+            reasons.append('Price broke upper BB')
+
+            if volume_data['volume_ratio'] > self.volume_threshold:
+                confidence += 25
+                reasons.append(f'High volume ({volume_data["volume_ratio"]:.2f}x)')
+            elif volume_data['volume_ratio'] > 1.0:
+                confidence += 10
+                reasons.append(f'Above avg volume ({volume_data["volume_ratio"]:.2f}x)')
+
+            if 50 <= rsi <= self.rsi_overbought + 10:
+                confidence += 15
+                reasons.append(f'RSI trend-friendly ({rsi:.1f})')
+            elif rsi > self.rsi_overbought + 10:
+                confidence -= 10
+                reasons.append(f'RSI overheated ({rsi:.1f})')
+
+            if bb_percent > 1.0:
+                confidence += 10
+                reasons.append('Price outside upper band')
+
+            if self.use_macd:
+                if macd_signal_cross == 'bullish_cross':
+                    confidence += 20
+                    reasons.append('MACD bullish cross')
+                elif macd_signal_cross == 'bullish_momentum':
+                    confidence += 12
+                    reasons.append('MACD bullish momentum')
+                elif macd_histogram < 0:
+                    confidence -= 10
+                    reasons.append('MACD bearish warning')
+
+            if confidence >= 50:
+                stop_loss = price - (atr * self.stop_loss_atr_multiplier)
+
+                take_profit = self._calculate_take_profit(
+                    'LONG', price, stop_loss, middle, upper, lower, atr
+                )
+
+                return {
+                    'signal': 'BUY',
+                    'confidence': min(confidence, 100),
+                    'reason': ' | '.join(reasons),
+                    'entry_price': price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'risk_reward': (take_profit - price) / (price - stop_loss) if price > stop_loss else 0
+                }
+
+        # === SHORT BREAKDOWN ===
+        elif price < lower:
+            confidence += 35
+            reasons.append('Price broke lower BB')
+
+            if volume_data['volume_ratio'] > self.volume_threshold:
+                confidence += 25
+                reasons.append(f'High volume ({volume_data["volume_ratio"]:.2f}x)')
+            elif volume_data['volume_ratio'] > 1.0:
+                confidence += 10
+                reasons.append(f'Above avg volume ({volume_data["volume_ratio"]:.2f}x)')
+
+            if self.rsi_oversold - 10 <= rsi <= 50:
+                confidence += 15
+                reasons.append(f'RSI trend-friendly ({rsi:.1f})')
+            elif rsi < self.rsi_oversold - 10:
+                confidence -= 10
+                reasons.append(f'RSI oversold warning ({rsi:.1f})')
+
+            if bb_percent < 0:
+                confidence += 10
+                reasons.append('Price outside lower band')
+
+            if self.use_macd:
+                if macd_signal_cross == 'bearish_cross':
+                    confidence += 20
+                    reasons.append('MACD bearish cross')
+                elif macd_signal_cross == 'bearish_momentum':
+                    confidence += 12
+                    reasons.append('MACD bearish momentum')
+                elif macd_histogram > 0:
+                    confidence -= 10
+                    reasons.append('MACD bullish warning')
+
+            if confidence >= 50:
+                stop_loss = price + (atr * self.stop_loss_atr_multiplier)
+
+                take_profit = self._calculate_take_profit(
+                    'SHORT', price, stop_loss, middle, upper, lower, atr
+                )
+
+                return {
+                    'signal': 'SELL',
+                    'confidence': min(confidence, 100),
+                    'reason': ' | '.join(reasons),
+                    'entry_price': price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'risk_reward': (price - take_profit) / (stop_loss - price) if stop_loss > price else 0
+                }
+
+        # Trend exit hint: price returns to middle band area.
+        if middle * 0.99 <= price <= middle * 1.01:
+            return {
+                'signal': 'TAKE_PROFIT',
+                'confidence': 60,
+                'reason': 'Price returned to middle band after trend move',
+                'entry_price': 0.0,
+                'stop_loss': 0.0,
+                'take_profit': middle
+            }
+
+        return {
+            'signal': 'WAIT',
+            'confidence': confidence,
+            'reason': 'No breakout signal | ' + ' | '.join(reasons) if reasons else 'Waiting for breakout',
             'entry_price': 0.0,
             'stop_loss': 0.0,
             'take_profit': 0.0

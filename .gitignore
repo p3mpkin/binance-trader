@@ -4,6 +4,10 @@
 /app/config.py
 /db/orders.db
 /binance-trader.log
+/bollinger_trader.log
+/auto_trade_movers.log
+/paper_state.json
+/paper_state.json.tmp
 
 **/env
 *.pyc

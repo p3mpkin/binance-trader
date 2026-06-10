@@ -15,6 +15,9 @@ class BinanceAPI:
     BASE_URL = "https://www.binance.com/api/v1"
     BASE_URL_V3 = "https://api.binance.com/api/v3"
     PUBLIC_URL = "https://www.binance.com/exchange/public/product"
+    REQUEST_TIMEOUT = 30
+    REQUEST_RETRIES = 3
+    REQUEST_RETRY_WAIT = 0.5
 
     def __init__(self, key, secret):
         self.key = key
@@ -22,7 +25,7 @@ class BinanceAPI:
 
     def ping(self):
         path = "%s/ping" % self.BASE_URL_V3
-        return requests.get(path, timeout=30, verify=True).json()
+        return self._request_json("GET", path)
     
     def get_history(self, market, limit=50):
         path = "%s/historicalTrades" % self.BASE_URL
@@ -44,6 +47,10 @@ class BinanceAPI:
         params = {"symbol": market}
         return self._get_no_sign(path, params)
 
+    def get_tickers(self):
+        path = "%s/ticker/24hr" % self.BASE_URL_V3
+        return self._get_no_sign(path, {})
+
     def get_order_books(self, market, limit=50):
         path = "%s/depth" % self.BASE_URL
         params = {"symbol": market, "limit": limit}
@@ -54,15 +61,15 @@ class BinanceAPI:
         return self._get(path, {})
 
     def get_products(self):
-        return requests.get(self.PUBLIC_URL, timeout=30, verify=True).json()
+        return self._request_json("GET", self.PUBLIC_URL)
    
     def get_server_time(self):
         path = "%s/time" % self.BASE_URL_V3
-        return requests.get(path, timeout=30, verify=True).json()
+        return self._request_json("GET", path)
     
     def get_exchange_info(self):
         path = "%s/exchangeInfo" % self.BASE_URL
-        return requests.get(path, timeout=30, verify=True).json()
+        return self._request_json("GET", path)
 
     def get_open_orders(self, market, limit = 100):
         path = "%s/openOrders" % self.BASE_URL_V3
@@ -107,7 +114,7 @@ class BinanceAPI:
     def _get_no_sign(self, path, params={}):
         query = urlencode(params)
         url = "%s?%s" % (path, query)
-        return requests.get(url, timeout=30, verify=True).json()
+        return self._request_json("GET", url)
     
     def _sign(self, params={}):
         data = params.copy()
@@ -126,16 +133,14 @@ class BinanceAPI:
         query = urlencode(self._sign(params))
         url = "%s?%s" % (path, query)
         header = {"X-MBX-APIKEY": self.key}
-        return requests.get(url, headers=header, \
-            timeout=30, verify=True).json()
+        return self._request_json("GET", url, headers=header)
 
     def _post(self, path, params={}):
         params.update({"recvWindow": config.recv_window})
         query = urlencode(self._sign(params))
         url = "%s" % (path)
         header = {"X-MBX-APIKEY": self.key}
-        return requests.post(url, headers=header, data=query, \
-            timeout=30, verify=True).json()
+        return self._request_json("POST", url, headers=header, data=query)
 
     def _order(self, market, quantity, side, rate=None):
         params = {}
@@ -158,8 +163,29 @@ class BinanceAPI:
         query = urlencode(self._sign(params))
         url = "%s?%s" % (path, query)
         header = {"X-MBX-APIKEY": self.key}
-        return requests.delete(url, headers=header, \
-            timeout=30, verify=True).json()
+        return self._request_json("DELETE", url, headers=header)
 
     def _format(self, price):
         return "{:.8f}".format(price)
+
+    def _request_json(self, method, url, **kwargs):
+        last_error = None
+        for attempt in range(self.REQUEST_RETRIES):
+            try:
+                response = requests.request(
+                    method,
+                    url,
+                    timeout=self.REQUEST_TIMEOUT,
+                    verify=True,
+                    **kwargs
+                )
+                response.raise_for_status()
+                return response.json()
+            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                last_error = exc
+                if attempt < self.REQUEST_RETRIES - 1:
+                    time.sleep(self.REQUEST_RETRY_WAIT * (attempt + 1))
+                    continue
+                raise
+
+        raise last_error
